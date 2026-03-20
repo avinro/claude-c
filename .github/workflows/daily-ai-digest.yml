@@ -26,6 +26,8 @@ jobs:
       - name: Run daily digest
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WHATSAPP_NUMBER: ${{ secrets.WHATSAPP_NUMBER }}
+          CALLMEBOT_API_KEY: ${{ secrets.CALLMEBOT_API_KEY }}
         run: python scripts/daily_ai_digest.py
 
       - name: Upload PDF artifact

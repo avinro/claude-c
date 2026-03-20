@@ -7,6 +7,8 @@ synthesizes findings, and saves a PDF + MD report.
 
 import os
 import json
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -242,6 +244,34 @@ def save_pdf(findings: dict, summary: str) -> Path:
     return pdf_path
 
 
+def send_whatsapp(summary: str, today: str) -> None:
+    """Send a WhatsApp summary via CallMeBot API."""
+    phone = os.environ.get("WHATSAPP_NUMBER")
+    apikey = os.environ.get("CALLMEBOT_API_KEY")
+    if not phone or not apikey:
+        print("  WhatsApp skipped — WHATSAPP_NUMBER or CALLMEBOT_API_KEY not set.")
+        return
+
+    # Build a short message (WhatsApp limit ~4096 chars)
+    lines = [f"*AI & Design Digest — {today}*\n"]
+    for line in summary.strip().split("\n"):
+        clean = line.strip().lstrip("•-*").strip()
+        if clean:
+            lines.append(f"• {clean}")
+    lines.append(f"\n_Reporte completo: github.com/avinro/claude-c/tree/main/reports_")
+    message = "\n".join(lines)
+
+    url = (
+        "https://api.callmebot.com/whatsapp.php?"
+        + urllib.parse.urlencode({"phone": phone, "text": message, "apikey": apikey})
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            print(f"  WhatsApp enviado — HTTP {r.status}")
+    except Exception as e:
+        print(f"  WhatsApp error: {e}")
+
+
 def main():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -277,6 +307,10 @@ def main():
     print("\nPHASE 3: Saving reports...")
     save_markdown(findings, summary)
     save_pdf(findings, summary)
+
+    # Phase 4: WhatsApp notification
+    print("\nPHASE 4: Sending WhatsApp notification...")
+    send_whatsapp(summary, TODAY)
 
     print(f"\nDone! Reports in reports/{TODAY}-digest.{{md,pdf}}")
 
