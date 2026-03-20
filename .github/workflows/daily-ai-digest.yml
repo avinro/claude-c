@@ -1,0 +1,43 @@
+name: Daily AI & Design Digest
+
+on:
+  schedule:
+    - cron: '0 13 * * *'  # 7 AM CST (UTC-6) cada día
+  workflow_dispatch:       # También permite dispararlo manualmente desde GitHub
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # Para hacer commit de los reportes al repo
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install anthropic reportlab
+
+      - name: Run daily digest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/daily_ai_digest.py
+
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-digest-${{ github.run_id }}
+          path: reports/
+          retention-days: 30
+
+      - name: Commit reports to repo
+        run: |
+          git config --global user.name  "AI Digest Bot"
+          git config --global user.email "bot@noreply.github.com"
+          git add reports/
+          git diff --staged --quiet || (git commit -m "Daily AI Digest $(date +%Y-%m-%d)" && git push)

@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.next/
+
+# Environment files — NEVER commit
+.env
+.env.local
+.env*.local
+
+# Logs
+logs/*.log
+
+# OS
+.DS_Store
+
+# TypeScript
+*.tsbuildinfo
+
+# WhatsApp session — contains auth tokens, NEVER commit
+.wwebjs_auth/
