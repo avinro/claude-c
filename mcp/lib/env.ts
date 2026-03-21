@@ -1,24 +1,17 @@
 import { z } from "zod";
 
 const EnvSchema = z.object({
-  // Research APIs
-  BRAVE_API_KEY: z.string().optional(),
-  PERPLEXITY_API_KEY: z.string().optional(),
-  NEWS_API_KEY: z.string().optional(),
-  GNEWS_API_KEY: z.string().optional(),
-
   // Dev tools
   GITHUB_TOKEN: z.string().optional(),
   FIGMA_TOKEN: z.string().optional(),
 
-  // AI / document research
+  // AI / document research — web search goes through NotebookLM
   GEMINI_API_KEY: z.string().optional(),
 
-  // Linear
-  LINEAR_API_KEY: z.string().optional(),
+  // Linear — webhook validation (MCP plugin uses OAuth, no API key needed)
   LINEAR_WEBHOOK_SECRET: z.string().optional(),
 
-  // WhatsApp — comma-separated E.164 numbers allowed to send commands, e.g. "521XXXXXXXXXX,521YYYYYYYYYY"
+  // WhatsApp — comma-separated E.164 numbers allowed to send commands
   // IMPORTANT: set this before use — without it, any sender can trigger Claude Code commands
   WHATSAPP_ALLOWED_NUMBERS: z.string().optional(),
 

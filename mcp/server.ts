@@ -5,10 +5,7 @@ import { logger } from "./lib/logger.js";
 
 import { registerFetchUrl } from "./tools/fetch_url.js";
 import { registerArxivSearch } from "./tools/arxiv_search.js";
-import { registerWebSearch } from "./tools/web_search.js";
-import { registerPerplexityResearch } from "./tools/perplexity_research.js";
 import { registerGithubSearch } from "./tools/github_search.js";
-import { registerNewsSearch } from "./tools/news_search.js";
 import { registerDocumentResearch } from "./tools/document_research.js";
 import { registerNotebooklm } from "./tools/notebooklm.js";
 import { registerFigmaRead } from "./tools/figma_read.js";
@@ -25,12 +22,10 @@ async function main() {
   });
 
   // Register all tools
+  // Research: web search goes through notebooklm — no Brave/Perplexity/NewsAPI keys needed
   registerFetchUrl(server, env);
   registerArxivSearch(server, env);
-  registerWebSearch(server, env);
-  registerPerplexityResearch(server, env);
   registerGithubSearch(server, env);
-  registerNewsSearch(server, env);
   registerDocumentResearch(server, env);
   registerNotebooklm(server, env);
   registerFigmaRead(server, env);
@@ -43,7 +38,7 @@ async function main() {
   // Nothing else may write to stdout — all logging uses stderr via logger.
   const transport = new StdioServerTransport();
 
-  logger.info("MCP server starting (15 tools registered)");
+  logger.info("MCP server starting (9 tools registered)");
   await server.connect(transport);
   logger.info("MCP server connected and ready");
 }

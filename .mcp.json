@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "research": {
+      "command": "node",
+      "args": ["/Users/avinro/Claude-C/dist/mcp/server.js"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+        "FIGMA_TOKEN": "${FIGMA_TOKEN}",
+        "LINEAR_WEBHOOK_SECRET": "${LINEAR_WEBHOOK_SECRET}",
+        "WHATSAPP_ALLOWED_NUMBERS": "${WHATSAPP_ALLOWED_NUMBERS}",
+        "LOG_LEVEL": "info"
+      }
+    }
+  }
+}
