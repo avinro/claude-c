@@ -245,14 +245,16 @@ def save_pdf(findings: dict, summary: str) -> Path:
 
 
 def send_whatsapp(summary: str, today: str) -> None:
-    """Send a WhatsApp summary via CallMeBot API."""
+    """Send a WhatsApp summary via GREEN-API."""
     phone = os.environ.get("WHATSAPP_NUMBER")
-    apikey = os.environ.get("CALLMEBOT_API_KEY")
-    if not phone or not apikey:
-        print("  WhatsApp skipped — WHATSAPP_NUMBER or CALLMEBOT_API_KEY not set.")
+    id_instance = os.environ.get("GREENAPI_ID_INSTANCE")
+    api_token = os.environ.get("GREENAPI_API_TOKEN")
+
+    if not phone or not id_instance or not api_token:
+        print("  WhatsApp skipped — GREENAPI_ID_INSTANCE, GREENAPI_API_TOKEN o WHATSAPP_NUMBER no configurados.")
         return
 
-    # Build a short message (WhatsApp limit ~4096 chars)
+    # Build message (WhatsApp limit ~4096 chars)
     lines = [f"*AI & Design Digest — {today}*\n"]
     for line in summary.strip().split("\n"):
         clean = line.strip().lstrip("•-*").strip()
@@ -261,13 +263,21 @@ def send_whatsapp(summary: str, today: str) -> None:
     lines.append(f"\n_Reporte completo: github.com/avinro/claude-c/tree/main/reports_")
     message = "\n".join(lines)
 
-    url = (
-        "https://api.callmebot.com/whatsapp.php?"
-        + urllib.parse.urlencode({"phone": phone, "text": message, "apikey": apikey})
+    # GREEN-API: POST to sendMessage endpoint
+    url = f"https://api.green-api.com/waInstance{id_instance}/sendMessage/{api_token}"
+    chat_id = f"{phone}@c.us"
+    payload = json.dumps({"chatId": chat_id, "message": message}).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            print(f"  WhatsApp enviado — HTTP {r.status}")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = r.read().decode()
+            print(f"  WhatsApp enviado via GREEN-API — HTTP {r.status} | {body}")
     except Exception as e:
         print(f"  WhatsApp error: {e}")
 
