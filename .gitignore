@@ -21,3 +21,8 @@ logs/*.log
 
 # WhatsApp session — contains auth tokens, NEVER commit
 .wwebjs_auth/
+.claude/settings.local.json
+.env.example
+.wwebjs_cache/
+logs/
+next-env.d.ts
