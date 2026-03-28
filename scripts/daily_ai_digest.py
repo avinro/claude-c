@@ -7,6 +7,7 @@ synthesizes findings, and saves a PDF + MD report.
 
 import os
 import json
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -25,6 +26,8 @@ from reportlab.lib.enums import TA_CENTER
 TODAY = datetime.utcnow().strftime("%Y-%m-%d")
 REPORTS_DIR = Path("reports")
 REPORTS_DIR.mkdir(exist_ok=True)
+
+MODEL = "claude-sonnet-4-6"
 
 TOPICS = [
     {
@@ -62,29 +65,46 @@ TOPICS = [
 ]
 
 
+def api_call_with_retry(fn, max_retries=4):
+    """Call fn(); retry with exponential backoff on rate limit errors."""
+    delay = 30
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except anthropic.RateLimitError as e:
+            if attempt == max_retries - 1:
+                raise
+            print(f"    Rate limit hit — waiting {delay}s before retry {attempt + 1}/{max_retries - 1}...")
+            time.sleep(delay)
+            delay *= 2
+
+
 def research_topic(client: anthropic.Anthropic, topic: dict) -> str:
     """Research a single topic using Claude with web search."""
     print(f"  Researching: {topic['label']}...")
 
-    response = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=2048,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Search for the latest news and releases about: {topic['label']}\n\n"
-                    f"Search query: {topic['query']}\n\n"
-                    "Return ONLY concrete, new items from the last 24-48 hours "
-                    "(actual releases, announcements, papers — not opinion pieces).\n\n"
-                    "Format each item as:\n"
-                    "- [Title] | [Date] | [URL] | [1-sentence summary]\n\n"
-                    "If nothing new was found in the last 48h, say: NO_NEW_ITEMS"
-                ),
-            }
-        ],
-    )
+    def call():
+        return client.messages.create(
+            model=MODEL,
+            max_tokens=2048,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Search for the latest news and releases about: {topic['label']}\n\n"
+                        f"Search query: {topic['query']}\n\n"
+                        "Return ONLY concrete, new items from the last 24-48 hours "
+                        "(actual releases, announcements, papers — not opinion pieces).\n\n"
+                        "Format each item as:\n"
+                        "- [Title] | [Date] | [URL] | [1-sentence summary]\n\n"
+                        "If nothing new was found in the last 48h, say: NO_NEW_ITEMS"
+                    ),
+                }
+            ],
+        )
+
+    response = api_call_with_retry(call)
 
     # Extract the final text response
     for block in reversed(response.content):
@@ -103,22 +123,25 @@ def synthesize(client: anthropic.Anthropic, findings: dict) -> str:
         for label, text in findings.items()
     )
 
-    response = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Based on today's ({TODAY}) AI & Design research findings below, "
-                    "write a concise Executive Summary of 4-5 bullet points covering "
-                    "the most important developments. Be specific — mention actual "
-                    "product names, numbers, and impact.\n\n"
-                    f"{all_findings}"
-                ),
-            }
-        ],
-    )
+    def call():
+        return client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Based on today's ({TODAY}) AI & Design research findings below, "
+                        "write a concise Executive Summary of 4-5 bullet points covering "
+                        "the most important developments. Be specific — mention actual "
+                        "product names, numbers, and impact.\n\n"
+                        f"{all_findings}"
+                    ),
+                }
+            ],
+        )
+
+    response = api_call_with_retry(call)
     return response.content[0].text
 
 
@@ -235,7 +258,7 @@ def save_pdf(findings: dict, summary: str) -> Path:
     story.append(Spacer(1, 0.08 * inch))
     story.append(Paragraph(
         f"Generated automatically on {TODAY} via GitHub Actions &nbsp;|&nbsp; "
-        "claude-opus-4-6 + web_search",
+        f"{MODEL} + web_search",
         footer_s,
     ))
 
@@ -296,6 +319,7 @@ def main():
     findings = {}
     for topic in TOPICS:
         findings[topic["label"]] = research_topic(client, topic)
+        time.sleep(5)  # small pause between calls to avoid rate limits
 
     # Count items
     total = sum(
