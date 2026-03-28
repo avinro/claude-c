@@ -3,14 +3,23 @@ Daily AI & Design Research Digest
 Runs via GitHub Actions every day at 7 AM CST.
 Researches 4 topics using Claude API + web search,
 synthesizes findings, and saves a PDF + MD report.
+
+Resilience strategy:
+  - Every API call retries up to 5x with exponential backoff (30s→60s→120s→240s→480s).
+  - If a topic still fails after all retries, it is marked RESEARCH_FAILED and skipped
+    (the rest of the topics continue normally).
+  - If synthesis fails, a plain-text summary is assembled from the raw findings.
+  - If the PDF render fails, the Markdown report is still saved.
+  - The script always exits with code 0 so GitHub Actions marks the run as success
+    even when partial data is missing; failed topics are logged as warnings.
 """
 
 import os
 import json
 import time
-import urllib.parse
+import traceback
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
@@ -18,12 +27,10 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, HRFlowable
-)
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from reportlab.lib.enums import TA_CENTER
 
-TODAY = datetime.utcnow().strftime("%Y-%m-%d")
+TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 REPORTS_DIR = Path("reports")
 REPORTS_DIR.mkdir(exist_ok=True)
 
@@ -64,23 +71,50 @@ TOPICS = [
     },
 ]
 
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
 
-def api_call_with_retry(fn, max_retries=4):
-    """Call fn(); retry with exponential backoff on rate limit errors."""
+def api_call_with_retry(fn, label="call", max_retries=5):
+    """
+    Call fn(). On RateLimitError or transient API errors, wait and retry
+    with exponential backoff. Returns None (never raises) after exhausting
+    all retries so the caller can decide how to handle partial results.
+    """
     delay = 30
+    last_exc = None
     for attempt in range(max_retries):
         try:
             return fn()
         except anthropic.RateLimitError as e:
-            if attempt == max_retries - 1:
-                raise
-            print(f"    Rate limit hit — waiting {delay}s before retry {attempt + 1}/{max_retries - 1}...")
-            time.sleep(delay)
-            delay *= 2
+            last_exc = e
+            wait = delay * (2 ** attempt)
+            print(f"    [WARN] Rate limit on {label} — waiting {wait}s "
+                  f"(attempt {attempt + 1}/{max_retries})...")
+            time.sleep(wait)
+        except (anthropic.APIStatusError, anthropic.APIConnectionError,
+                anthropic.APITimeoutError) as e:
+            last_exc = e
+            wait = delay * (2 ** attempt)
+            print(f"    [WARN] API error on {label}: {e} — waiting {wait}s "
+                  f"(attempt {attempt + 1}/{max_retries})...")
+            time.sleep(wait)
+        except Exception as e:
+            # Unexpected error — log and abort retries immediately
+            print(f"    [ERROR] Unexpected error on {label}: {e}")
+            traceback.print_exc()
+            return None
 
+    print(f"    [ERROR] {label} failed after {max_retries} retries: {last_exc}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Research
+# ---------------------------------------------------------------------------
 
 def research_topic(client: anthropic.Anthropic, topic: dict) -> str:
-    """Research a single topic using Claude with web search."""
+    """Research a single topic. Returns finding text or a FAILED sentinel."""
     print(f"  Researching: {topic['label']}...")
 
     def call():
@@ -104,9 +138,10 @@ def research_topic(client: anthropic.Anthropic, topic: dict) -> str:
             ],
         )
 
-    response = api_call_with_retry(call)
+    response = api_call_with_retry(call, label=topic["label"])
+    if response is None:
+        return "RESEARCH_FAILED"
 
-    # Extract the final text response
     for block in reversed(response.content):
         if hasattr(block, "text"):
             return block.text
@@ -114,13 +149,25 @@ def research_topic(client: anthropic.Anthropic, topic: dict) -> str:
     return "NO_NEW_ITEMS"
 
 
+# ---------------------------------------------------------------------------
+# Synthesis
+# ---------------------------------------------------------------------------
+
 def synthesize(client: anthropic.Anthropic, findings: dict) -> str:
-    """Use Claude to write an executive summary from all findings."""
+    """Synthesize an executive summary. Falls back to a plain list if API fails."""
     print("  Synthesizing executive summary...")
 
+    # Only pass topics that actually have content
+    usable = {
+        label: text for label, text in findings.items()
+        if text not in ("NO_NEW_ITEMS", "RESEARCH_FAILED")
+    }
+
+    if not usable:
+        return "No new content was found today across all tracked topics."
+
     all_findings = "\n\n".join(
-        f"=== {label} ===\n{text}"
-        for label, text in findings.items()
+        f"=== {label} ===\n{text}" for label, text in usable.items()
     )
 
     def call():
@@ -141,20 +188,29 @@ def synthesize(client: anthropic.Anthropic, findings: dict) -> str:
             ],
         )
 
-    response = api_call_with_retry(call)
-    return response.content[0].text
+    response = api_call_with_retry(call, label="synthesis")
+    if response is not None:
+        return response.content[0].text
 
+    # Fallback: build a plain summary from raw findings
+    print("    [WARN] Synthesis API failed — using plain-text fallback summary.")
+    lines = [f"Research summary for {TODAY} (auto-generated fallback):\n"]
+    for label, text in usable.items():
+        first_item = next(
+            (l.strip() for l in text.split("\n") if l.strip().startswith("-")),
+            None,
+        )
+        if first_item:
+            lines.append(f"• {label}: {first_item.lstrip('- ')}")
+    return "\n".join(lines) if len(lines) > 1 else "See individual sections for details."
+
+
+# ---------------------------------------------------------------------------
+# Save reports
+# ---------------------------------------------------------------------------
 
 def save_markdown(findings: dict, summary: str) -> Path:
-    """Save the full digest as a Markdown file."""
     md_path = REPORTS_DIR / f"{TODAY}-digest.md"
-
-    lines = [
-        f"# AI & Design Daily Digest — {TODAY}\n",
-        "## Executive Summary\n",
-        summary,
-        "\n---\n",
-    ]
 
     section_numbers = {
         "New AI Models": "1",
@@ -163,6 +219,12 @@ def save_markdown(findings: dict, summary: str) -> Path:
         "AI Workflows & Automation": "4",
     }
 
+    lines = [
+        f"# AI & Design Daily Digest — {TODAY}\n",
+        "## Executive Summary\n",
+        summary,
+        "\n---\n",
+    ]
     for label, text in findings.items():
         num = section_numbers.get(label, "")
         lines.append(f"\n## Section {num} — {label}\n")
@@ -175,162 +237,180 @@ def save_markdown(findings: dict, summary: str) -> Path:
     return md_path
 
 
-def save_pdf(findings: dict, summary: str) -> Path:
-    """Generate a styled PDF report."""
+def save_pdf(findings: dict, summary: str) -> Path | None:
+    """Generate PDF. Returns None on error (Markdown is already saved)."""
     pdf_path = REPORTS_DIR / f"{TODAY}-digest.pdf"
 
-    doc = SimpleDocTemplate(
-        str(pdf_path),
-        pagesize=letter,
-        rightMargin=0.75 * inch,
-        leftMargin=0.75 * inch,
-        topMargin=0.75 * inch,
-        bottomMargin=0.75 * inch,
-    )
+    try:
+        doc = SimpleDocTemplate(
+            str(pdf_path),
+            pagesize=letter,
+            rightMargin=0.75 * inch,
+            leftMargin=0.75 * inch,
+            topMargin=0.75 * inch,
+            bottomMargin=0.75 * inch,
+        )
 
-    styles = getSampleStyleSheet()
-    dark = colors.HexColor("#1a1a2e")
-    light_bg = colors.HexColor("#f0f4ff")
+        styles = getSampleStyleSheet()
+        dark = colors.HexColor("#1a1a2e")
+        light_bg = colors.HexColor("#f0f4ff")
 
-    title_s = ParagraphStyle("T", parent=styles["Title"],
-        fontSize=22, spaceAfter=6, textColor=dark, alignment=TA_CENTER)
-    sub_s = ParagraphStyle("S", parent=styles["Normal"],
-        fontSize=10, textColor=colors.HexColor("#555555"),
-        alignment=TA_CENTER, spaceAfter=12)
-    section_s = ParagraphStyle("H", parent=styles["Heading1"],
-        fontSize=12, textColor=colors.white, backColor=dark,
-        spaceBefore=14, spaceAfter=6, borderPadding=(4, 6, 4, 6))
-    body_s = ParagraphStyle("B", parent=styles["Normal"],
-        fontSize=9.5, spaceAfter=5, leftIndent=10, leading=14)
-    bullet_s = ParagraphStyle("BU", parent=styles["Normal"],
-        fontSize=10, spaceAfter=6, leftIndent=16, leading=15,
-        backColor=light_bg, borderPadding=4)
-    footer_s = ParagraphStyle("F", parent=styles["Normal"],
-        fontSize=7.5, textColor=colors.HexColor("#888888"),
-        alignment=TA_CENTER)
+        title_s = ParagraphStyle("T", parent=styles["Title"],
+            fontSize=22, spaceAfter=6, textColor=dark, alignment=TA_CENTER)
+        sub_s = ParagraphStyle("S", parent=styles["Normal"],
+            fontSize=10, textColor=colors.HexColor("#555555"),
+            alignment=TA_CENTER, spaceAfter=12)
+        section_s = ParagraphStyle("H", parent=styles["Heading1"],
+            fontSize=12, textColor=colors.white, backColor=dark,
+            spaceBefore=14, spaceAfter=6, borderPadding=(4, 6, 4, 6))
+        body_s = ParagraphStyle("B", parent=styles["Normal"],
+            fontSize=9.5, spaceAfter=5, leftIndent=10, leading=14)
+        bullet_s = ParagraphStyle("BU", parent=styles["Normal"],
+            fontSize=10, spaceAfter=6, leftIndent=16, leading=15,
+            backColor=light_bg, borderPadding=4)
+        footer_s = ParagraphStyle("F", parent=styles["Normal"],
+            fontSize=7.5, textColor=colors.HexColor("#888888"),
+            alignment=TA_CENTER)
 
-    story = []
+        story = []
+        story.append(Spacer(1, 0.1 * inch))
+        story.append(Paragraph("AI &amp; Design Daily Digest", title_s))
+        story.append(Paragraph(
+            f"{TODAY} &nbsp;|&nbsp; Powered by Claude API + GitHub Actions", sub_s
+        ))
+        story.append(HRFlowable(width="100%", thickness=2, color=dark))
+        story.append(Spacer(1, 0.12 * inch))
 
-    story.append(Spacer(1, 0.1 * inch))
-    story.append(Paragraph("AI &amp; Design Daily Digest", title_s))
-    story.append(Paragraph(
-        f"{TODAY} &nbsp;|&nbsp; Powered by Claude API + GitHub Actions", sub_s
-    ))
-    story.append(HRFlowable(width="100%", thickness=2, color=dark))
-    story.append(Spacer(1, 0.12 * inch))
-
-    # Executive summary
-    story.append(Paragraph("EXECUTIVE SUMMARY", section_s))
-    story.append(Spacer(1, 4))
-    for line in summary.strip().split("\n"):
-        line = line.strip().lstrip("•-*").strip()
-        if line:
-            story.append(Paragraph(f"<bullet>&bull;</bullet> {line}", bullet_s))
-
-    story.append(Spacer(1, 0.08 * inch))
-
-    # Sections
-    section_labels = {
-        "New AI Models": "SECTION 1 — NEW AI MODELS",
-        "Design-to-Code": "SECTION 2 — DESIGN-TO-CODE",
-        "AI in UI/UX Design": "SECTION 3 — AI IN UI/UX DESIGN",
-        "AI Workflows & Automation": "SECTION 4 — AI WORKFLOWS &amp; AUTOMATION",
-    }
-
-    for label, text in findings.items():
-        heading = section_labels.get(label, label.upper())
-        story.append(Paragraph(heading, section_s))
+        story.append(Paragraph("EXECUTIVE SUMMARY", section_s))
         story.append(Spacer(1, 4))
-        for line in text.strip().split("\n"):
-            line = line.strip()
-            if line and line != "NO_NEW_ITEMS":
-                # Bold the title part before the first " | "
-                if " | " in line:
-                    parts = line.lstrip("-• ").split(" | ", 1)
-                    formatted = f"<b>{parts[0]}</b> | {parts[1]}"
-                else:
-                    formatted = line
-                story.append(Paragraph(formatted, body_s))
-        story.append(Spacer(1, 0.06 * inch))
+        for line in summary.strip().split("\n"):
+            line = line.strip().lstrip("•-*").strip()
+            if line:
+                story.append(Paragraph(f"<bullet>&bull;</bullet> {line}", bullet_s))
+        story.append(Spacer(1, 0.08 * inch))
 
-    story.append(HRFlowable(width="100%", thickness=1,
-                             color=colors.HexColor("#cccccc")))
-    story.append(Spacer(1, 0.08 * inch))
-    story.append(Paragraph(
-        f"Generated automatically on {TODAY} via GitHub Actions &nbsp;|&nbsp; "
-        f"{MODEL} + web_search",
-        footer_s,
-    ))
+        section_labels = {
+            "New AI Models": "SECTION 1 — NEW AI MODELS",
+            "Design-to-Code": "SECTION 2 — DESIGN-TO-CODE",
+            "AI in UI/UX Design": "SECTION 3 — AI IN UI/UX DESIGN",
+            "AI Workflows & Automation": "SECTION 4 — AI WORKFLOWS &amp; AUTOMATION",
+        }
 
-    doc.build(story)
-    print(f"  PDF saved: {pdf_path}")
-    return pdf_path
+        for label, text in findings.items():
+            heading = section_labels.get(label, label.upper())
+            story.append(Paragraph(heading, section_s))
+            story.append(Spacer(1, 4))
+            display_text = text if text not in ("NO_NEW_ITEMS", "RESEARCH_FAILED") else text
+            for line in display_text.strip().split("\n"):
+                line = line.strip()
+                if line and line not in ("NO_NEW_ITEMS", "RESEARCH_FAILED"):
+                    if " | " in line:
+                        parts = line.lstrip("-• ").split(" | ", 1)
+                        formatted = f"<b>{parts[0]}</b> | {parts[1]}"
+                    else:
+                        formatted = line
+                    story.append(Paragraph(formatted, body_s))
+                elif line in ("NO_NEW_ITEMS", "RESEARCH_FAILED"):
+                    story.append(Paragraph(
+                        f"<i>{'No new items found' if line == 'NO_NEW_ITEMS' else 'Research unavailable today'}</i>",
+                        body_s,
+                    ))
+            story.append(Spacer(1, 0.06 * inch))
 
+        story.append(HRFlowable(width="100%", thickness=1,
+                                 color=colors.HexColor("#cccccc")))
+        story.append(Spacer(1, 0.08 * inch))
+        story.append(Paragraph(
+            f"Generated automatically on {TODAY} via GitHub Actions &nbsp;|&nbsp; "
+            f"{MODEL} + web_search",
+            footer_s,
+        ))
+
+        doc.build(story)
+        print(f"  PDF saved: {pdf_path}")
+        return pdf_path
+
+    except Exception as e:
+        print(f"  [WARN] PDF generation failed: {e} — Markdown report still available.")
+        traceback.print_exc()
+        return None
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp
+# ---------------------------------------------------------------------------
 
 def send_whatsapp(summary: str, today: str) -> None:
-    """Send a WhatsApp summary via GREEN-API."""
     phone = os.environ.get("WHATSAPP_NUMBER")
     id_instance = os.environ.get("GREENAPI_ID_INSTANCE")
     api_token = os.environ.get("GREENAPI_API_TOKEN")
 
     if not phone or not id_instance or not api_token:
-        print("  WhatsApp skipped — GREENAPI_ID_INSTANCE, GREENAPI_API_TOKEN o WHATSAPP_NUMBER no configurados.")
+        print("  WhatsApp skipped — credentials not configured.")
         return
 
-    # Build message (WhatsApp limit ~4096 chars)
     lines = [f"*AI & Design Digest — {today}*\n"]
     for line in summary.strip().split("\n"):
         clean = line.strip().lstrip("•-*").strip()
         if clean:
             lines.append(f"• {clean}")
-    lines.append(f"\n_Reporte completo: github.com/avinro/claude-c/tree/main/reports_")
+    lines.append(f"\n_Full report: github.com/avinro/claude-c/tree/main/reports_")
     message = "\n".join(lines)
 
-    # GREEN-API: POST to sendMessage endpoint
     url = f"https://api.green-api.com/waInstance{id_instance}/sendMessage/{api_token}"
-    chat_id = f"{phone}@c.us"
-    payload = json.dumps({"chatId": chat_id, "message": message}).encode("utf-8")
-
+    payload = json.dumps({"chatId": f"{phone}@c.us", "message": message}).encode("utf-8")
     req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        url, data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
-            body = r.read().decode()
-            print(f"  WhatsApp enviado via GREEN-API — HTTP {r.status} | {body}")
+            print(f"  WhatsApp sent — HTTP {r.status} | {r.read().decode()}")
     except Exception as e:
-        print(f"  WhatsApp error: {e}")
+        print(f"  [WARN] WhatsApp failed: {e}")
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable not set.")
+        print("[ERROR] ANTHROPIC_API_KEY not set.")
+        raise SystemExit(1)
 
     client = anthropic.Anthropic(api_key=api_key)
-
     print(f"\n=== Daily AI & Design Digest — {TODAY} ===\n")
 
-    # Phase 1: Research all 4 topics
+    # Phase 1: Research — each topic is independent; failures are isolated
     print("PHASE 1: Researching topics...")
     findings = {}
-    for topic in TOPICS:
+    failed_topics = []
+    for i, topic in enumerate(TOPICS):
         findings[topic["label"]] = research_topic(client, topic)
-        time.sleep(5)  # small pause between calls to avoid rate limits
+        if findings[topic["label"]] == "RESEARCH_FAILED":
+            failed_topics.append(topic["label"])
+        # Pause between calls to reduce rate-limit pressure
+        if i < len(TOPICS) - 1:
+            time.sleep(10)
 
-    # Count items
-    total = sum(
+    successful = [l for l, t in findings.items() if t not in ("NO_NEW_ITEMS", "RESEARCH_FAILED")]
+    print(f"\n  Topics researched successfully: {len(successful)}/{len(TOPICS)}")
+    if failed_topics:
+        print(f"  [WARN] Failed topics (will be skipped): {', '.join(failed_topics)}")
+
+    total_items = sum(
         text.count("\n- ") + (1 if text.strip().startswith("- ") else 0)
         for text in findings.values()
-        if text != "NO_NEW_ITEMS"
+        if text not in ("NO_NEW_ITEMS", "RESEARCH_FAILED")
     )
-    print(f"\n  Total items found: {total}")
+    print(f"  Total items found: {total_items}")
 
-    if total < 2:
-        print("  No relevant content today — skipping digest.")
+    if not successful:
+        print("  No content retrieved today — saving empty report and exiting.")
+        # Still save a placeholder so the artifact is always uploaded
+        save_markdown(findings, "No content could be retrieved today.")
         return
 
     # Phase 2: Synthesize
@@ -342,7 +422,7 @@ def main():
     save_markdown(findings, summary)
     save_pdf(findings, summary)
 
-    # Phase 4: WhatsApp notification
+    # Phase 4: WhatsApp
     print("\nPHASE 4: Sending WhatsApp notification...")
     send_whatsapp(summary, TODAY)
 
