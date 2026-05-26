@@ -1,0 +1,35 @@
+name: Organize Emails Daily
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 6 AM UTC / 2 AM EST cada día
+  workflow_dispatch:     # También permite dispararlo manualmente desde GitHub
+
+jobs:
+  organize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install googleapis
+
+      - name: Create .env.local
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          echo "GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID" > .env.local
+          echo "GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET" >> .env.local
+          echo "GOOGLE_REFRESH_TOKEN=$GOOGLE_REFRESH_TOKEN" >> .env.local
+
+      - name: Run email organization
+        run: node scripts/organize-emails.mjs
