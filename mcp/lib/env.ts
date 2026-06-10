@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+declare const process: {
+  env: Record<string, string | undefined>;
+  stderr: {
+    write(message: string): void;
+  };
+  exit(code?: number): never;
+};
+
 const EnvSchema = z.object({
   // Dev tools
   GITHUB_TOKEN: z.string().optional(),
@@ -11,10 +19,6 @@ const EnvSchema = z.object({
   // Linear — webhook validation (MCP plugin uses OAuth, no API key needed)
   LINEAR_WEBHOOK_SECRET: z.string().optional(),
 
-  // WhatsApp — comma-separated E.164 numbers allowed to send commands
-  // IMPORTANT: set this before use — without it, any sender can trigger Claude Code commands
-  WHATSAPP_ALLOWED_NUMBERS: z.string().optional(),
-
   // Server config
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
@@ -23,11 +27,12 @@ export type ValidatedEnv = z.infer<typeof EnvSchema>;
 
 export function validateEnv(): ValidatedEnv {
   const result = EnvSchema.safeParse(process.env);
-  if (!result.success) {
-    process.stderr.write(
-      `[MCP] Env validation failed: ${JSON.stringify(result.error.flatten().fieldErrors)}\n`
-    );
-    process.exit(1);
+  if (result.success) {
+    return result.data;
   }
-  return result.data;
+
+  process.stderr.write(
+    `[MCP] Env validation failed: ${JSON.stringify(result.error.flatten().fieldErrors)}\n`
+  );
+  process.exit(1);
 }

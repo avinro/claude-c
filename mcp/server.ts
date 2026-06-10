@@ -11,7 +11,6 @@ import { registerNotebooklm } from "./tools/notebooklm.js";
 import { registerFigmaRead } from "./tools/figma_read.js";
 import { registerFigmaVariables } from "./tools/figma_variables.js";
 import { registerCreateResearchReport } from "./tools/create_research_report.js";
-import { registerWhatsapp, initWhatsappClient } from "./tools/whatsapp.js";
 
 async function main() {
   const env = validateEnv();
@@ -31,14 +30,12 @@ async function main() {
   registerFigmaRead(server, env);
   registerFigmaVariables(server, env);
   registerCreateResearchReport(server, env);
-  registerWhatsapp(server, env);
-  initWhatsappClient(); // non-blocking — Puppeteer starts in background, waReady gates tool calls
 
   // CRITICAL: StdioServerTransport reads from stdin, writes to stdout.
   // Nothing else may write to stdout — all logging uses stderr via logger.
   const transport = new StdioServerTransport();
 
-  logger.info("MCP server starting (9 tools registered)");
+  logger.info("MCP server starting (8 tools registered)");
   await server.connect(transport);
   logger.info("MCP server connected and ready");
 }

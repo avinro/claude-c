@@ -21,11 +21,11 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install anthropic reportlab
+        run: pip install google-genai reportlab
 
       - name: Run daily digest
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WHATSAPP_NUMBER: ${{ secrets.WHATSAPP_NUMBER }}
           GREENAPI_ID_INSTANCE: ${{ secrets.GREENAPI_ID_INSTANCE }}
           GREENAPI_API_TOKEN: ${{ secrets.GREENAPI_API_TOKEN }}
