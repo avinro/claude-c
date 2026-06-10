@@ -15,9 +15,12 @@
  *     under their category label.
  *
  * Usage:
- *   node scripts/inbox-triage.mjs              # triage up to 100 emails
+ *   node scripts/inbox-triage.mjs              # triage up to 100 untriaged emails
  *   node scripts/inbox-triage.mjs --dry-run    # print verdicts, change nothing
  *   node scripts/inbox-triage.mjs --limit=300  # raise per-run cap
+ *   node scripts/inbox-triage.mjs --force      # re-evaluate ALL inbox mail,
+ *                                              # ignoring the _triaged marker
+ *                                              # (use after changing rules)
  */
 
 import { google } from 'googleapis';
@@ -41,6 +44,10 @@ if (fs.existsSync(envPath)) {
 }
 
 const DRY_RUN = process.argv.includes('--dry-run');
+// --force re-evaluates everything currently in the inbox, ignoring the
+// _triaged marker. Use it after changing category rules so already-triaged
+// mail still in the inbox gets reclassified with the new logic.
+const FORCE_RETRIAGE = process.argv.includes('--force');
 const limitArg = process.argv.find(a => a.startsWith('--limit='));
 const LIMIT = limitArg ? Number(limitArg.split('=')[1]) : 100;
 if (!Number.isInteger(LIMIT) || LIMIT < 0) {
@@ -64,27 +71,38 @@ const FOLDERS = {
 // Job application responses get special handling:
 //   JOB_REJECTED → archived under Jobs/Rejected + WhatsApp notification
 //   JOB_POSITIVE → stays in inbox, forced UNREAD, labeled Jobs/Positive + WhatsApp notification
+//   JOB_RECEIVED → archived under Jobs/Applied (just an "application received"
+//                  acknowledgement — no attention needed, no notification)
 const JOB_LABELS = {
   Jobs:            { color: { backgroundColor: '#16a766', textColor: '#ffffff' } },
   'Jobs/Rejected': { color: { backgroundColor: '#cc3a21', textColor: '#ffffff' } },
   'Jobs/Positive': { color: { backgroundColor: '#16a766', textColor: '#ffffff' } },
+  'Jobs/Applied':  { color: { backgroundColor: '#fad165', textColor: '#000000' } },
   // MEETING_BOOKED → stays in inbox, forced UNREAD, labeled Meetings + WhatsApp notification
   Meetings:        { color: { backgroundColor: '#4986e7', textColor: '#ffffff' } },
 };
 
-const CATEGORIES = ['ATTENTION', 'JOB_POSITIVE', 'JOB_REJECTED', 'MEETING_BOOKED', ...Object.keys(FOLDERS)];
+const CATEGORIES = ['ATTENTION', 'JOB_POSITIVE', 'JOB_REJECTED', 'JOB_RECEIVED', 'MEETING_BOOKED', ...Object.keys(FOLDERS)];
 
 const CLASSIFIER_PROMPT = `You are an email triage agent for Ary Vincench (avinroart@gmail.com),
 a Product Design Engineer based in Spain who works as an autónomo (freelancer).
 
 Classify each email into exactly one category:
 
-- JOB_POSITIVE: a response to a job application Ary submitted that moves the
-  process FORWARD: interview invitations, requests to schedule a call, take-home
-  assignments or tests, requests for portfolio/documents, offers, or any message
-  from a recruiter/hiring team showing interest in him as a candidate. Do NOT
-  use for job-board alerts, "new jobs for you" digests, or "application
-  received" auto-confirmations.
+- JOB_POSITIVE: a response to a job application that moves the process FORWARD
+  and asks Ary to DO something or signals real interest: interview invitations,
+  requests to schedule a call, take-home assignments or tests, requests for
+  portfolio/documents, offers, or a recruiter personally reaching out about a
+  specific opportunity. There must be a concrete next step. Do NOT use for
+  job-board alerts, "new jobs for you" digests, or mere acknowledgements that an
+  application was received (those are JOB_RECEIVED).
+- JOB_RECEIVED: an automated acknowledgement that an application was received,
+  with NO next step or decision yet: "thank you for applying", "we've received
+  your application", "confirmation of your application", "thanks for your
+  interest, we'll be in touch", "your application is under review". These are
+  receipts, not progress and not rejection. Typical senders: greenhouse,
+  ashbyhq, smartrecruiters, workday, lever. If it neither asks Ary to do
+  something nor rejects him, it is JOB_RECEIVED, not JOB_POSITIVE.
 - JOB_REJECTED: a response to a job application that CLOSES the process:
   "unfortunately", "we will not be moving forward", "we went with another
   candidate", "the position has been filled", or similar rejection language
@@ -173,10 +191,11 @@ async function listUntriagedInbox(limit) {
 
   const messages = [];
   let pageToken = null;
+  const query = FORCE_RETRIAGE ? 'in:inbox' : `in:inbox -label:${TRIAGED_LABEL}`;
   do {
     const res = await gmail.users.messages.list({
       userId: 'me',
-      q: `in:inbox -label:${TRIAGED_LABEL}`,
+      q: query,
       maxResults: Math.min(500, limit - messages.length),
       ...(pageToken && { pageToken }),
     });
@@ -249,34 +268,50 @@ async function classifyBatch(emails) {
 
 // ---------- Apply ----------
 
+// The four mutually-exclusive special labels. Every plan removes the ones it
+// isn't applying, so re-classification (e.g. via --force) never leaves an email
+// stuck in two job folders at once. Removing a label a message doesn't have is
+// a harmless no-op in the Gmail API.
+const EXCLUSIVE_LABELS = ['Jobs/Positive', 'Jobs/Rejected', 'Jobs/Applied', 'Meetings'];
+
 function planFor(category, labelIds, triagedId) {
-  if (category === 'ATTENTION') {
-    return { add: [triagedId], remove: [], action: '→ se queda en INBOX' };
-  }
+  const siblingsToClear = keep =>
+    EXCLUSIVE_LABELS.filter(name => name !== keep).map(name => labelIds[name]);
+
   if (category === 'JOB_POSITIVE') {
     return {
       add: [labelIds['Jobs/Positive'], triagedId, 'UNREAD'],
-      remove: [],
+      remove: siblingsToClear('Jobs/Positive'),
       action: '→ Jobs/Positive (INBOX, no leído) 🎉',
     };
   }
   if (category === 'JOB_REJECTED') {
     return {
       add: [labelIds['Jobs/Rejected'], triagedId],
-      remove: ['INBOX'],
+      remove: ['INBOX', ...siblingsToClear('Jobs/Rejected')],
       action: '→ archivado en "Jobs/Rejected"',
+    };
+  }
+  if (category === 'JOB_RECEIVED') {
+    return {
+      add: [labelIds['Jobs/Applied'], triagedId],
+      remove: ['INBOX', ...siblingsToClear('Jobs/Applied')],
+      action: '→ archivado en "Jobs/Applied"',
     };
   }
   if (category === 'MEETING_BOOKED') {
     return {
       add: [labelIds.Meetings, triagedId, 'UNREAD'],
-      remove: [],
+      remove: siblingsToClear('Meetings'),
       action: '→ Meetings (INBOX, no leído) 📅',
     };
   }
+  if (category === 'ATTENTION') {
+    return { add: [triagedId], remove: siblingsToClear(null), action: '→ se queda en INBOX' };
+  }
   return {
     add: [labelIds[category], triagedId],
-    remove: ['INBOX'],
+    remove: ['INBOX', ...siblingsToClear(null)],
     action: `→ archivado en "${category}"`,
   };
 }
@@ -373,7 +408,7 @@ async function notifyWhatsApp(notifiable) {
 // ---------- Main ----------
 
 async function run() {
-  console.log(`🤖 Inbox Triage — modelo: ${GEMINI_MODEL}${DRY_RUN ? ' (DRY RUN)' : ''}\n`);
+  console.log(`🤖 Inbox Triage — modelo: ${GEMINI_MODEL}${FORCE_RETRIAGE ? ' (FORCE)' : ''}${DRY_RUN ? ' (DRY RUN)' : ''}\n`);
 
   const triagedId = DRY_RUN ? 'DRY_RUN_TRIAGED' : await ensureLabel(TRIAGED_LABEL, { hidden: true });
   const labelIds = DRY_RUN
@@ -417,8 +452,12 @@ async function run() {
     for (const [cat, ids] of Object.entries(byCategory)) {
       totals[cat] = (totals[cat] || 0) + ids.length;
     }
+    // JOB_RECEIVED is intentionally excluded — application receipts are filed
+    // silently into Jobs/Applied without a WhatsApp ping.
     notifiable.push(
-      ...classified.filter(e => e.category.startsWith('JOB_') || e.category === 'MEETING_BOOKED')
+      ...classified.filter(e =>
+        ['JOB_POSITIVE', 'JOB_REJECTED', 'MEETING_BOOKED'].includes(e.category)
+      )
     );
   }
 
