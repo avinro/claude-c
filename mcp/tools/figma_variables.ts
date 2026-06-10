@@ -28,14 +28,18 @@ async function figmaPost(path: string, body: unknown, token: string) {
 
 async function figmaGet(path: string, token: string) {
   const res = await fetch(`https://api.figma.com/v1${path}`, { headers: { "X-Figma-Token": token }, signal: AbortSignal.timeout(20000) });
-  if (!res.ok) throw new Error(`Figma API ${res.status}: ${res.statusText}`);
+  if (!res.ok) {
+    // 403 here almost always means the org is not on the Enterprise plan (Variables REST API requirement)
+    const body = await res.text().catch(() => "");
+    throw new Error(`Figma API ${res.status}: ${res.statusText}${body ? ` — ${body.slice(0, 300)}` : ""}`);
+  }
   return res.json();
 }
 
 export function registerFigmaVariables(server: McpServer, env: ValidatedEnv) {
   server.tool(
     "figma_variables",
-    "Manage Figma design variables (design tokens): list, create, update variables and collections. Full CRUD via Figma Variables REST API.",
+    "Manage Figma design variables (design tokens): list, create, update variables and collections. Full CRUD via Figma Variables REST API. Note: this API requires a Figma Enterprise org — expect 403 otherwise.",
     Schema.shape,
     async (input) => {
       if (!env.FIGMA_TOKEN) return { content: [{ type: "text" as const, text: "figma_variables requires FIGMA_TOKEN" }], isError: true };

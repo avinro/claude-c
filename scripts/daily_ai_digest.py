@@ -1,28 +1,35 @@
 """
 Daily AI & Design Research Digest
 Runs via GitHub Actions every day at 7 AM CST.
-Researches 4 topics using Claude API + web search,
+Researches 4 topics using the Gemini API + Google Search grounding,
 synthesizes findings, and saves a PDF + MD report.
 
 Resilience strategy:
-  - Every API call retries up to 5x with exponential backoff (30s→60s→120s→240s→480s).
-  - If a topic still fails after all retries, it is marked RESEARCH_FAILED and skipped
-    (the rest of the topics continue normally).
+  - Transient API errors (429 quota, 5xx, network) retry up to 5x with
+    exponential backoff (30s→60s→120s→240s→480s).
+  - Non-retryable API errors (400 invalid request, 401/403 auth) abort the
+    entire run immediately with a non-zero exit code so GitHub Actions marks
+    the run as failed — retrying these wastes an hour per run.
+  - If a single topic fails after retries, it is marked RESEARCH_FAILED and
+    skipped (the rest of the topics continue normally).
   - If synthesis fails, a plain-text summary is assembled from the raw findings.
   - If the PDF render fails, the Markdown report is still saved.
-  - The script always exits with code 0 so GitHub Actions marks the run as success
-    even when partial data is missing; failed topics are logged as warnings.
+  - If NO topic produced content, the script exits 1 without writing a report,
+    so empty "RESEARCH_FAILED" digests are never committed to the repo.
 """
 
 import os
+import re
 import json
 import time
 import traceback
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import anthropic
+from google import genai
+from google.genai import types as genai_types
+from google.genai import errors as genai_errors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -34,7 +41,8 @@ TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 REPORTS_DIR = Path("reports")
 REPORTS_DIR.mkdir(exist_ok=True)
 
-MODEL = "claude-sonnet-4-6"
+# gemini-2.5-flash-lite: free tier + Google Search grounding. Override via env.
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 TOPICS = [
     {
@@ -72,31 +80,120 @@ TOPICS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Seen-items ledger — dedupe across daily runs
+# ---------------------------------------------------------------------------
+# reports/seen-items.json maps a normalized item title -> first-seen date.
+# It lives in reports/ because the workflow already commits that directory,
+# so the ledger persists between GitHub Actions runs.
+
+SEEN_PATH = REPORTS_DIR / "seen-items.json"
+SEEN_RETENTION_DAYS = 180  # prune old entries so the file stays small
+PROMPT_EXCLUDE_DAYS = 7    # titles fed back into the prompt as "already seen"
+PROMPT_EXCLUDE_MAX = 50
+
+
+def load_seen() -> dict:
+    if SEEN_PATH.exists():
+        try:
+            return json.loads(SEEN_PATH.read_text())
+        except json.JSONDecodeError:
+            print("  [WARN] seen-items.json is corrupt — starting a fresh ledger.")
+    return {}
+
+
+def save_seen(seen: dict) -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    pruned = {k: v for k, v in seen.items() if v >= cutoff}
+    SEEN_PATH.write_text(json.dumps(pruned, indent=1, sort_keys=True) + "\n")
+    print(f"  Seen-items ledger saved: {len(pruned)} entries")
+
+
+def item_key(line: str) -> str | None:
+    """Normalize a '- Title | date | url | summary' bullet to a dedupe key."""
+    text = line.strip().lstrip("-• ").strip()
+    if not text:
+        return None
+    title = text.split(" | ", 1)[0]
+    title = re.sub(r"[\[\]*_`]", "", title)  # markdown noise
+    key = re.sub(r"[^a-z0-9 ]", "", title.lower())
+    key = re.sub(r"\s+", " ", key).strip()
+    return key or None
+
+
+def recent_seen_titles(seen: dict) -> list[str]:
+    """Titles first seen in the last PROMPT_EXCLUDE_DAYS, newest first."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=PROMPT_EXCLUDE_DAYS)).strftime("%Y-%m-%d")
+    recent = [(k, v) for k, v in seen.items() if v >= cutoff]
+    recent.sort(key=lambda kv: kv[1], reverse=True)
+    return [k for k, _ in recent[:PROMPT_EXCLUDE_MAX]]
+
+
+def filter_new_items(text: str, seen: dict) -> str:
+    """
+    Drop bullet lines whose title was already reported on a previous day and
+    register the surviving ones in the ledger. Returns the filtered text, or
+    NO_NEW_ITEMS when every bullet was a repeat.
+    """
+    kept: list[str] = []
+    new_count = 0
+    dropped = 0
+    for line in text.split("\n"):
+        if line.strip().startswith(("-", "•")):
+            key = item_key(line)
+            if key and key in seen and seen[key] != TODAY:
+                dropped += 1
+                continue
+            if key:
+                seen[key] = seen.get(key, TODAY)
+                new_count += 1
+        kept.append(line)
+
+    if dropped:
+        print(f"    Dedupe: {dropped} already-seen item(s) dropped, {new_count} new")
+    if new_count == 0:
+        return "NO_NEW_ITEMS"
+    return "\n".join(kept)
+
+
+# ---------------------------------------------------------------------------
 # Retry helper
 # ---------------------------------------------------------------------------
 
+class FatalAPIError(Exception):
+    """Non-retryable API failure (billing, auth, permissions) — abort the run."""
+
+
 def api_call_with_retry(fn, label="call", max_retries=5):
     """
-    Call fn(). On RateLimitError or transient API errors, wait and retry
-    with exponential backoff. Returns None (never raises) after exhausting
-    all retries so the caller can decide how to handle partial results.
+    Call fn(). On 429 quota or transient API errors (5xx, network), wait and
+    retry with exponential backoff. Returns None after exhausting all retries
+    so the caller can decide how to handle partial results.
+
+    Raises FatalAPIError for non-retryable errors (400 invalid request,
+    401/403 auth) — these affect every call in the run, so retrying or
+    continuing with other topics just burns CI minutes.
     """
     delay = 30
     last_exc = None
     for attempt in range(max_retries):
         try:
             return fn()
-        except anthropic.RateLimitError as e:
+        except genai_errors.APIError as e:
+            code = getattr(e, "code", None)
+            # 429 (free-tier quota) and 5xx are transient — retry
+            if code == 429 or (code is not None and code >= 500):
+                last_exc = e
+                wait = delay * (2 ** attempt)
+                print(f"    [WARN] API error {code} on {label}: {e} — waiting {wait}s "
+                      f"(attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            # 400/401/403/404: same error will hit every topic — fail fast
+            raise FatalAPIError(f"{label}: {e}") from e
+        except (ConnectionError, TimeoutError) as e:
             last_exc = e
             wait = delay * (2 ** attempt)
-            print(f"    [WARN] Rate limit on {label} — waiting {wait}s "
-                  f"(attempt {attempt + 1}/{max_retries})...")
-            time.sleep(wait)
-        except (anthropic.APIStatusError, anthropic.APIConnectionError,
-                anthropic.APITimeoutError) as e:
-            last_exc = e
-            wait = delay * (2 ** attempt)
-            print(f"    [WARN] API error on {label}: {e} — waiting {wait}s "
+            print(f"    [WARN] Network error on {label}: {e} — waiting {wait}s "
                   f"(attempt {attempt + 1}/{max_retries})...")
             time.sleep(wait)
         except Exception as e:
@@ -113,47 +210,55 @@ def api_call_with_retry(fn, label="call", max_retries=5):
 # Research
 # ---------------------------------------------------------------------------
 
-def research_topic(client: anthropic.Anthropic, topic: dict) -> str:
+def research_topic(client: genai.Client, topic: dict, seen: dict) -> str:
     """Research a single topic. Returns finding text or a FAILED sentinel."""
     print(f"  Researching: {topic['label']}...")
 
+    exclude = recent_seen_titles(seen)
+    exclude_block = (
+        "\n\nThe following items were ALREADY reported in previous digests — "
+        "do NOT include them again, even with rephrased titles:\n"
+        + "\n".join(f"- {t}" for t in exclude)
+        if exclude
+        else ""
+    )
+
     def call():
-        return client.messages.create(
+        return client.models.generate_content(
             model=MODEL,
-            max_tokens=2048,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"Search for the latest news and releases about: {topic['label']}\n\n"
-                        f"Search query: {topic['query']}\n\n"
-                        "Return ONLY concrete, new items from the last 24-48 hours "
-                        "(actual releases, announcements, papers — not opinion pieces).\n\n"
-                        "Format each item as:\n"
-                        "- [Title] | [Date] | [URL] | [1-sentence summary]\n\n"
-                        "If nothing new was found in the last 48h, say: NO_NEW_ITEMS"
-                    ),
-                }
-            ],
+            contents=(
+                f"Search for the latest news and releases about: {topic['label']}\n\n"
+                f"Search query: {topic['query']}\n\n"
+                "Return ONLY concrete, new items from the last 24-48 hours "
+                "(actual releases, announcements, papers — not opinion pieces)."
+                f"{exclude_block}\n\n"
+                "Format each item as:\n"
+                "- [Title] | [Date] | [URL] | [1-sentence summary]\n\n"
+                "If nothing new was found in the last 48h, say: NO_NEW_ITEMS"
+            ),
+            config=genai_types.GenerateContentConfig(
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                max_output_tokens=2048,
+            ),
         )
 
     response = api_call_with_retry(call, label=topic["label"])
     if response is None:
         return "RESEARCH_FAILED"
 
-    for block in reversed(response.content):
-        if hasattr(block, "text"):
-            return block.text
-
-    return "NO_NEW_ITEMS"
+    # response.text is None when the answer was blocked or empty
+    text = response.text or "NO_NEW_ITEMS"
+    if text.strip() == "NO_NEW_ITEMS":
+        return "NO_NEW_ITEMS"
+    # Drop items the ledger already knows about
+    return filter_new_items(text, seen)
 
 
 # ---------------------------------------------------------------------------
 # Synthesis
 # ---------------------------------------------------------------------------
 
-def synthesize(client: anthropic.Anthropic, findings: dict) -> str:
+def synthesize(client: genai.Client, findings: dict) -> str:
     """Synthesize an executive summary. Falls back to a plain list if API fails."""
     print("  Synthesizing executive summary...")
 
@@ -171,26 +276,21 @@ def synthesize(client: anthropic.Anthropic, findings: dict) -> str:
     )
 
     def call():
-        return client.messages.create(
+        return client.models.generate_content(
             model=MODEL,
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"Based on today's ({TODAY}) AI & Design research findings below, "
-                        "write a concise Executive Summary of 4-5 bullet points covering "
-                        "the most important developments. Be specific — mention actual "
-                        "product names, numbers, and impact.\n\n"
-                        f"{all_findings}"
-                    ),
-                }
-            ],
+            contents=(
+                f"Based on today's ({TODAY}) AI & Design research findings below, "
+                "write a concise Executive Summary of 4-5 bullet points covering "
+                "the most important developments. Be specific — mention actual "
+                "product names, numbers, and impact.\n\n"
+                f"{all_findings}"
+            ),
+            config=genai_types.GenerateContentConfig(max_output_tokens=1024),
         )
 
     response = api_call_with_retry(call, label="synthesis")
-    if response is not None:
-        return response.content[0].text
+    if response is not None and response.text:
+        return response.text
 
     # Fallback: build a plain summary from raw findings
     print("    [WARN] Synthesis API failed — using plain-text fallback summary.")
@@ -276,7 +376,7 @@ def save_pdf(findings: dict, summary: str) -> Path | None:
         story.append(Spacer(1, 0.1 * inch))
         story.append(Paragraph("AI &amp; Design Daily Digest", title_s))
         story.append(Paragraph(
-            f"{TODAY} &nbsp;|&nbsp; Powered by Claude API + GitHub Actions", sub_s
+            f"{TODAY} &nbsp;|&nbsp; Powered by Gemini API + GitHub Actions", sub_s
         ))
         story.append(HRFlowable(width="100%", thickness=2, color=dark))
         story.append(Spacer(1, 0.12 * inch))
@@ -322,7 +422,7 @@ def save_pdf(findings: dict, summary: str) -> Path | None:
         story.append(Spacer(1, 0.08 * inch))
         story.append(Paragraph(
             f"Generated automatically on {TODAY} via GitHub Actions &nbsp;|&nbsp; "
-            f"{MODEL} + web_search",
+            f"{MODEL} + Google Search grounding",
             footer_s,
         ))
 
@@ -375,20 +475,28 @@ def send_whatsapp(summary: str, today: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("[ERROR] ANTHROPIC_API_KEY not set.")
+        print("[ERROR] GEMINI_API_KEY not set.")
         raise SystemExit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     print(f"\n=== Daily AI & Design Digest — {TODAY} ===\n")
+
+    seen = load_seen()
+    print(f"  Seen-items ledger: {len(seen)} previously reported item(s)\n")
 
     # Phase 1: Research — each topic is independent; failures are isolated
     print("PHASE 1: Researching topics...")
     findings = {}
     failed_topics = []
     for i, topic in enumerate(TOPICS):
-        findings[topic["label"]] = research_topic(client, topic)
+        try:
+            findings[topic["label"]] = research_topic(client, topic, seen)
+        except FatalAPIError as e:
+            print(f"\n[FATAL] Non-retryable API error — aborting run: {e}")
+            print("        Check billing/credits and API key at console.anthropic.com")
+            raise SystemExit(1)
         if findings[topic["label"]] == "RESEARCH_FAILED":
             failed_topics.append(topic["label"])
         # Pause between calls to reduce rate-limit pressure
@@ -408,19 +516,30 @@ def main():
     print(f"  Total items found: {total_items}")
 
     if not successful:
-        print("  No content retrieved today — saving empty report and exiting.")
-        # Still save a placeholder so the artifact is always uploaded
-        save_markdown(findings, "No content could be retrieved today.")
+        if failed_topics:
+            # No placeholder report: committing "RESEARCH_FAILED" digests
+            # pollutes repo history and hides the failure. Fail the workflow.
+            print("  [FATAL] No content retrieved today — failing the run.")
+            raise SystemExit(1)
+        # All topics genuinely had nothing new (API worked, dedupe did its
+        # job) — a quiet day is a success, not a failure. No report needed.
+        print("  Nothing new today across all topics — no report generated.")
+        save_seen(seen)
         return
 
     # Phase 2: Synthesize
     print("\nPHASE 2: Synthesizing...")
-    summary = synthesize(client, findings)
+    try:
+        summary = synthesize(client, findings)
+    except FatalAPIError as e:
+        print(f"\n[FATAL] Non-retryable API error during synthesis: {e}")
+        raise SystemExit(1)
 
-    # Phase 3: Save reports
+    # Phase 3: Save reports + persist the dedupe ledger
     print("\nPHASE 3: Saving reports...")
     save_markdown(findings, summary)
     save_pdf(findings, summary)
+    save_seen(seen)
 
     # Phase 4: WhatsApp
     print("\nPHASE 4: Sending WhatsApp notification...")

@@ -1,5 +1,13 @@
 {
   "mcpServers": {
+    "gmail-avinroart": {
+      "command": "npx",
+      "args": ["@gongrzhe/server-gmail-autoauth-mcp"],
+      "env": {
+        "GMAIL_OAUTH_PATH": "/Users/avinro/.gmail-mcp-avinroart/gcp-oauth.keys.json",
+        "GMAIL_CREDENTIALS_PATH": "/Users/avinro/.gmail-mcp-avinroart/credentials.json"
+      }
+    },
     "research": {
       "command": "node",
       "args": ["/Users/avinro/Claude-C/dist/mcp/server.js"],
