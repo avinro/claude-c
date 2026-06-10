@@ -41,7 +41,12 @@ if (fs.existsSync(envPath)) {
 }
 
 const DRY_RUN = process.argv.includes('--dry-run');
-const LIMIT = Number((process.argv.find(a => a.startsWith('--limit=')) || '').split('=')[1]) || 100;
+const limitArg = process.argv.find(a => a.startsWith('--limit='));
+const LIMIT = limitArg ? Number(limitArg.split('=')[1]) : 100;
+if (!Number.isInteger(LIMIT) || LIMIT < 0) {
+  console.error('❌ --limit must be a non-negative integer.');
+  process.exit(1);
+}
 const GEMINI_MODEL = env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const AI_BATCH_SIZE = 20;
 const TRIAGED_LABEL = '_triaged';
@@ -156,6 +161,8 @@ async function ensureLabel(name, config = {}) {
 }
 
 async function listUntriagedInbox(limit) {
+  if (limit === 0) return [];
+
   const messages = [];
   let pageToken = null;
   do {
@@ -347,10 +354,14 @@ async function notifyWhatsApp(jobEmails) {
 async function run() {
   console.log(`🤖 Inbox Triage — modelo: ${GEMINI_MODEL}${DRY_RUN ? ' (DRY RUN)' : ''}\n`);
 
-  const triagedId = await ensureLabel(TRIAGED_LABEL, { hidden: true });
-  const labelIds = {};
-  for (const [name, config] of Object.entries({ ...FOLDERS, ...JOB_LABELS })) {
-    labelIds[name] = await ensureLabel(name, config);
+  const triagedId = DRY_RUN ? 'DRY_RUN_TRIAGED' : await ensureLabel(TRIAGED_LABEL, { hidden: true });
+  const labelIds = DRY_RUN
+    ? Object.fromEntries(Object.keys({ ...FOLDERS, ...JOB_LABELS }).map(name => [name, `DRY_RUN_${name}`]))
+    : {};
+  if (!DRY_RUN) {
+    for (const [name, config] of Object.entries({ ...FOLDERS, ...JOB_LABELS })) {
+      labelIds[name] = await ensureLabel(name, config);
+    }
   }
 
   const messages = await listUntriagedInbox(LIMIT);
