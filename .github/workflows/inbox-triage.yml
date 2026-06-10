@@ -2,7 +2,7 @@ name: Inbox Triage (AI)
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # Cada 3 horas
+    - cron: '0 * * * *'  # Cada hora — las notificaciones de llamadas agendadas no esperan más de ~1h
   workflow_dispatch:        # También permite dispararlo manualmente desde GitHub
 
 jobs:

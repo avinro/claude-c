@@ -68,9 +68,11 @@ const JOB_LABELS = {
   Jobs:            { color: { backgroundColor: '#16a766', textColor: '#ffffff' } },
   'Jobs/Rejected': { color: { backgroundColor: '#cc3a21', textColor: '#ffffff' } },
   'Jobs/Positive': { color: { backgroundColor: '#16a766', textColor: '#ffffff' } },
+  // MEETING_BOOKED → stays in inbox, forced UNREAD, labeled Meetings + WhatsApp notification
+  Meetings:        { color: { backgroundColor: '#4986e7', textColor: '#ffffff' } },
 };
 
-const CATEGORIES = ['ATTENTION', 'JOB_POSITIVE', 'JOB_REJECTED', ...Object.keys(FOLDERS)];
+const CATEGORIES = ['ATTENTION', 'JOB_POSITIVE', 'JOB_REJECTED', 'MEETING_BOOKED', ...Object.keys(FOLDERS)];
 
 const CLASSIFIER_PROMPT = `You are an email triage agent for Ary Vincench (avinroart@gmail.com),
 a Product Design Engineer based in Spain who works as an autónomo (freelancer).
@@ -88,6 +90,12 @@ Classify each email into exactly one category:
   candidate", "the position has been filled", or similar rejection language
   (in English or Spanish). Only for replies to applications he actually made,
   not job-board noise.
+- MEETING_BOOKED: someone scheduled, rescheduled, or canceled a meeting/call
+  WITH Ary through a scheduling tool (Calendly, Cal.com, etc.) or a direct
+  calendar invitation addressed to him. Typical senders: notifications@calendly.com.
+  Typical subjects: "New Event:", "Rescheduled:", "Canceled:", "Invitation:".
+  Do NOT use for meeting reminders of events he already knows about, calendar
+  digests, or webinar/mass-event confirmations he signed up for.
 - ATTENTION: stays in the inbox. Use ONLY for emails a human must see soon:
   personal messages from real people, direct work/client communication that
   expects a reply,
@@ -103,7 +111,7 @@ Classify each email into exactly one category:
 - Finance: bank statements, transaction alerts, investment updates — routine
   financial mail that needs no action.
 - Notifications: automated noreply notifications (CI, GitHub activity, social
-  media, app activity, calendar/system notices, delivery tracking).
+  media, app activity, meeting reminders, system notices, delivery tracking).
 - Promotions: marketing, sales, discounts, product launches, event invites
   sent to a list, cold outreach/spam-adjacent sales emails.
 
@@ -259,6 +267,13 @@ function planFor(category, labelIds, triagedId) {
       action: '→ archivado en "Jobs/Rejected"',
     };
   }
+  if (category === 'MEETING_BOOKED') {
+    return {
+      add: [labelIds.Meetings, triagedId, 'UNREAD'],
+      remove: [],
+      action: '→ Meetings (INBOX, no leído) 📅',
+    };
+  }
   return {
     add: [labelIds[category], triagedId],
     remove: ['INBOX'],
@@ -293,11 +308,11 @@ async function applyVerdicts(classified, labelIds, triagedId) {
 
 // ---------- WhatsApp notification (GREEN-API) ----------
 
-async function notifyWhatsApp(jobEmails) {
-  if (jobEmails.length === 0) return;
+async function notifyWhatsApp(notifiable) {
+  if (notifiable.length === 0) return;
   const { GREENAPI_ID_INSTANCE, GREENAPI_API_TOKEN, WHATSAPP_NUMBER } = env;
   if (!GREENAPI_ID_INSTANCE || !GREENAPI_API_TOKEN || !WHATSAPP_NUMBER) {
-    console.log('⚠️  WhatsApp no configurado — notificación de empleos omitida.');
+    console.log('⚠️  WhatsApp no configurado — notificación omitida.');
     return;
   }
 
@@ -306,7 +321,7 @@ async function notifyWhatsApp(jobEmails) {
     const stateRes = await fetch(`${baseUrl}/getStateInstance/${GREENAPI_API_TOKEN}`);
     const state = await stateRes.json();
     if (state.stateInstance !== 'authorized') {
-      console.log(`⚠️  WhatsApp no autorizado en GREEN-API (${state.stateInstance || 'estado desconocido'}) — notificación de empleos omitida.`);
+      console.log(`⚠️  WhatsApp no autorizado en GREEN-API (${state.stateInstance || 'estado desconocido'}) — notificación omitida.`);
       return;
     }
   } catch (err) {
@@ -314,16 +329,22 @@ async function notifyWhatsApp(jobEmails) {
     return;
   }
 
-  const positives = jobEmails.filter(e => e.category === 'JOB_POSITIVE');
-  const rejections = jobEmails.filter(e => e.category === 'JOB_REJECTED');
-  const lines = ['*📋 Respuestas de aplicaciones de trabajo*', ''];
+  const positives = notifiable.filter(e => e.category === 'JOB_POSITIVE');
+  const rejections = notifiable.filter(e => e.category === 'JOB_REJECTED');
+  const meetings = notifiable.filter(e => e.category === 'MEETING_BOOKED');
+  const lines = ['*🔔 Inbox Triage*', ''];
+  if (meetings.length) {
+    lines.push(`📅 *Llamadas agendadas (${meetings.length}):*`);
+    for (const e of meetings) lines.push(`  • ${e.subject}`);
+    lines.push('');
+  }
   if (positives.length) {
-    lines.push(`✅ *Positivas (${positives.length}) — en tu inbox, sin leer:*`);
+    lines.push(`✅ *Trabajos — positivas (${positives.length}) — en tu inbox, sin leer:*`);
     for (const e of positives) lines.push(`  • ${e.from.replace(/<.*>/, '').trim()} — ${e.subject}`);
     lines.push('');
   }
   if (rejections.length) {
-    lines.push(`❌ *Rechazos (${rejections.length}) — movidos a Jobs/Rejected:*`);
+    lines.push(`❌ *Trabajos — rechazos (${rejections.length}) — movidos a Jobs/Rejected:*`);
     for (const e of rejections) lines.push(`  • ${e.from.replace(/<.*>/, '').trim()} — ${e.subject}`);
   }
 
@@ -373,7 +394,7 @@ async function run() {
 
   const emails = await fetchMetadata(messages);
   const totals = {};
-  const jobEmails = [];
+  const notifiable = [];
   let skipped = 0;
 
   for (let i = 0; i < emails.length; i += AI_BATCH_SIZE) {
@@ -396,10 +417,12 @@ async function run() {
     for (const [cat, ids] of Object.entries(byCategory)) {
       totals[cat] = (totals[cat] || 0) + ids.length;
     }
-    jobEmails.push(...classified.filter(e => e.category.startsWith('JOB_')));
+    notifiable.push(
+      ...classified.filter(e => e.category.startsWith('JOB_') || e.category === 'MEETING_BOOKED')
+    );
   }
 
-  if (!DRY_RUN) await notifyWhatsApp(jobEmails);
+  if (!DRY_RUN) await notifyWhatsApp(notifiable);
 
   console.log('\n📊 Resumen:');
   for (const cat of CATEGORIES) {
