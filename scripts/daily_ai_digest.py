@@ -26,6 +26,7 @@ import traceback
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from google import genai
 from google.genai import types as genai_types
@@ -386,7 +387,7 @@ def save_pdf(findings: dict, summary: str) -> Path | None:
         for line in summary.strip().split("\n"):
             line = line.strip().lstrip("•-*").strip()
             if line:
-                story.append(Paragraph(f"<bullet>&bull;</bullet> {line}", bullet_s))
+                story.append(Paragraph(f"<bullet>&bull;</bullet> {escape(line)}", bullet_s))
         story.append(Spacer(1, 0.08 * inch))
 
         section_labels = {
@@ -406,9 +407,9 @@ def save_pdf(findings: dict, summary: str) -> Path | None:
                 if line and line not in ("NO_NEW_ITEMS", "RESEARCH_FAILED"):
                     if " | " in line:
                         parts = line.lstrip("-• ").split(" | ", 1)
-                        formatted = f"<b>{parts[0]}</b> | {parts[1]}"
+                        formatted = f"<b>{escape(parts[0])}</b> | {escape(parts[1])}"
                     else:
-                        formatted = line
+                        formatted = escape(line)
                     story.append(Paragraph(formatted, body_s))
                 elif line in ("NO_NEW_ITEMS", "RESEARCH_FAILED"):
                     story.append(Paragraph(
@@ -448,6 +449,25 @@ def send_whatsapp(summary: str, today: str) -> None:
     if not phone or not id_instance or not api_token:
         print("  WhatsApp skipped — credentials not configured.")
         return
+    phone = re.sub(r"\D", "", phone)
+    if not phone:
+        print("  WhatsApp skipped — WHATSAPP_NUMBER has no digits.")
+        return
+
+    base_url = f"https://api.green-api.com/waInstance{id_instance}"
+    state_url = f"{base_url}/getStateInstance/{api_token}"
+    try:
+        with urllib.request.urlopen(state_url, timeout=15) as r:
+            state = json.loads(r.read().decode())
+        if state.get("stateInstance") != "authorized":
+            print(
+                "  WhatsApp skipped — GREEN-API not authorized "
+                f"({state.get('stateInstance', 'unknown')})."
+            )
+            return
+    except Exception as e:
+        print(f"  [WARN] WhatsApp state check failed: {e}")
+        return
 
     lines = [f"*AI & Design Digest — {today}*\n"]
     for line in summary.strip().split("\n"):
@@ -457,7 +477,7 @@ def send_whatsapp(summary: str, today: str) -> None:
     lines.append(f"\n_Full report: github.com/avinro/claude-c/tree/main/reports_")
     message = "\n".join(lines)
 
-    url = f"https://api.green-api.com/waInstance{id_instance}/sendMessage/{api_token}"
+    url = f"{base_url}/sendMessage/{api_token}"
     payload = json.dumps({"chatId": f"{phone}@c.us", "message": message}).encode("utf-8")
     req = urllib.request.Request(
         url, data=payload,
@@ -495,7 +515,7 @@ def main():
             findings[topic["label"]] = research_topic(client, topic, seen)
         except FatalAPIError as e:
             print(f"\n[FATAL] Non-retryable API error — aborting run: {e}")
-            print("        Check billing/credits and API key at console.anthropic.com")
+            print("        Check billing/credits and API key at aistudio.google.com")
             raise SystemExit(1)
         if findings[topic["label"]] == "RESEARCH_FAILED":
             failed_topics.append(topic["label"])

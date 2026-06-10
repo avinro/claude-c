@@ -9,7 +9,9 @@
     "start": "next start",
     "start:mcp": "node dist/mcp/server.js",
     "dev:mcp": "tsx watch mcp/server.ts",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "triage:inbox": "node scripts/inbox-triage.mjs",
+    "triage:inbox:dry": "node scripts/inbox-triage.mjs --dry-run"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.0",
