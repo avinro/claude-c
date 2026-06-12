@@ -42,8 +42,8 @@ TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 REPORTS_DIR = Path("reports")
 REPORTS_DIR.mkdir(exist_ok=True)
 
-# gemini-2.5-flash-lite: free tier + Google Search grounding. Override via env.
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+# gemini-3.1-flash-lite: free tier + Google Search grounding. Override via env.
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 TOPICS = [
     {
