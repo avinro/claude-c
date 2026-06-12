@@ -1,6 +1,6 @@
 """
 Daily AI & Design Research Digest
-Runs via GitHub Actions every day at 7 AM CST.
+Runs via GitHub Actions every morning (04:40 UTC, with an 08:40 UTC backup).
 Researches 4 topics using the Gemini API + Google Search grounding,
 synthesizes findings, and saves a PDF + MD report.
 

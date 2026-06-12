@@ -2,28 +2,48 @@ name: Daily AI & Design Digest
 
 on:
   schedule:
-    - cron: '0 13 * * *'  # 7 AM CST (UTC-6) cada día
+    # Primario: 04:40 UTC ≈ 06:40 CEST / 05:40 CET. Los runs programados de
+    # GitHub suelen retrasarse 1-4h en horas pico (el cron anterior, 13:00 UTC,
+    # llegaba a las 16:42-17:53 UTC). Madrugada UTC + minuto :40 minimiza el retraso.
+    - cron: '40 4 * * *'
+    # Respaldo: GitHub a veces OMITE runs programados bajo carga. Si el primario
+    # no corrió, este lo cubre. El guard de abajo evita duplicados.
+    - cron: '40 8 * * *'
   workflow_dispatch:       # También permite dispararlo manualmente desde GitHub
 
 jobs:
   research:
     runs-on: ubuntu-latest
+    timeout-minutes: 75    # los retries con backoff pueden tardar; histórico máx ~1h03m
     permissions:
       contents: write      # Para hacer commit de los reportes al repo
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Skip if today's digest already exists
+        id: guard
+        run: |
+          if [ -f "reports/$(date -u +%F)-digest.md" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Digest de $(date -u +%F) ya existe — run de respaldo no necesario."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
         run: pip install google-genai reportlab
 
       - name: Run daily digest
+        if: steps.guard.outputs.skip != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WHATSAPP_NUMBER: ${{ secrets.WHATSAPP_NUMBER }}
@@ -32,13 +52,15 @@ jobs:
         run: python scripts/daily_ai_digest.py
 
       - name: Upload PDF artifact
-        uses: actions/upload-artifact@v4
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
         with:
           name: ai-digest-${{ github.run_id }}
           path: reports/
           retention-days: 30
 
       - name: Commit reports to repo
+        if: steps.guard.outputs.skip != 'true'
         run: |
           git config --global user.name  "AI Digest Bot"
           git config --global user.email "bot@noreply.github.com"
