@@ -52,6 +52,7 @@
  "anthropic claude text watermarking announcement": "2026-08-21",
  "anthropic cybersecurity evaluation disclosure": "2026-07-31",
  "anthropic economic index report cadences": "2026-06-27",
+ "anthropic enterprise frontier safeguards efs": "2026-09-04",
  "anthropic extends claude fable 5 access": "2026-07-12",
  "anthropic integrates mythos 5 into partner security products": "2026-08-23",
  "anthropic invisible watermarking": "2026-08-16",
@@ -464,7 +465,9 @@
  "new arxiv research streammembench": "2026-06-15",
  "new arxiv research vista for gui grounding": "2026-06-15",
  "new relic introduces ai coding observability": "2026-06-10",
+ "new research longhorizon state tracking in llms": "2026-09-04",
  "new research on ais focus limitations in complex tasks": "2026-06-10",
+ "new research openagentflow safety framework": "2026-09-04",
  "nexn2pro model release": "2026-06-15",
  "nexxen launches mcp agenttoagent a2a integrations": "2026-06-17",
  "nice announces agentic ai native to core of customer experience platform": "2026-06-10",
@@ -488,6 +491,7 @@
  "omniscientist an omnimodal omnidiscipline ai scientist arxiv260813558": "2026-08-15",
  "onspring launches agentic grc": "2026-07-28",
  "openai and industry partners launch agent plugins standard": "2026-08-11",
+ "openai announces gpt6 astra": "2026-09-04",
  "openai announces upcoming astra model with enhanced safety": "2026-09-02",
  "openai chatgpt update gpt56 sol and luna availability": "2026-08-09",
  "openai codex reimagined as app builder with codex sites": "2026-06-10",
@@ -587,6 +591,7 @@
  "spacexai grok 46 release": "2026-08-13",
  "spacexai grok build mode": "2026-07-29",
  "splunk mcp server app v131 released": "2026-08-05",
+ "splunk mcp server v200": "2026-09-04",
  "stepfun step 37 flash release": "2026-06-09",
  "subotiz launches ai agent suite and mcp server": "2026-06-13",
  "symmetry mcp server for payroll tax": "2026-07-17",
@@ -663,5 +668,6 @@
  "xbtfx mcp server and skills hub announcement": "2026-07-04",
  "xplor technologies acquires bitlancer accelerating shift to aipowered workflows": "2026-06-10",
  "zhipu ai releases glm53flash": "2026-08-27",
- "zinfi opens early access to mcp server": "2026-08-25"
+ "zinfi opens early access to mcp server": "2026-08-25",
+ "zite mcp server launch": "2026-09-04"
 }
