@@ -138,6 +138,13 @@ email's "id" field.`;
 
 // ---------- Clients ----------
 
+const missingCreds = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'GEMINI_API_KEY']
+  .filter(k => !env[k]);
+if (missingCreds.length) {
+  console.warn(`⚠️  Faltan credenciales requeridas: ${missingCreds.join(', ')}. Saltando triage.`);
+  process.exit(0);
+}
+
 const auth = new google.auth.OAuth2(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET);
 auth.setCredentials({ refresh_token: env.GOOGLE_REFRESH_TOKEN });
 const gmail = google.gmail({ version: 'v1', auth });
